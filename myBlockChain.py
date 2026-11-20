@@ -238,8 +238,8 @@ def writeTx(txRawData):
                 writer.writerows(txDataList)
         except:
             return 0
-    return 1
     print('txData written to txData.csv.')
+    return 1
 
 def readTx(txFilePath):
     print("readTx")
