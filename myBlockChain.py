@@ -269,7 +269,8 @@ def getTxData():
     strTxData = ''
     importedTx = readTx(g_txFileName)
     if len(importedTx) > 0 :
-        for i in importedTx:
+        # take only the first g_maxTxPerBlock txs; the rest stay unmined (row[0] == '0') for the next block
+        for i in importedTx[:g_maxTxPerBlock]:
             print(i.__dict__)
             transaction = "["+ i.uuid + "]" "UserID " + i.sender + " sent " + i.amount + " bitTokens to UserID " + i.receiver + ". " #
             print(transaction)
@@ -277,11 +278,34 @@ def getTxData():
 
     return strTxData
 
+
+def startMining():
+    # decide whether a new mining job may start; True = started, False = already mining
+    # check and update must happen in the same lock block, otherwise two requests can both pass
+    with lock:
+        if g_miningState['state'] == 'mining':
+            return False
+        g_miningState.update({
+            'state':'mining', 'index':None, 'proof':None,
+            'seconds': None, 'updatedAt': time.time(),
+        })
+        return True
+
+
+def setMiningState(state, index=None, proof=None, seconds=None):
+    # keep the lock section tiny: only update the dict, no file or network access here
+    with lock:
+        g_miningState.update({
+            'state': state, 'index': index, 'proof': proof,
+            'seconds': seconds, 'updatedAt': time.time(),
+        })
+
 def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
     blockchain = readBlockchain(blockchainPath)
     strTxData = getTxData()
     if strTxData == '' :
         print('No TxData Found. Mining aborted')
+        setMiningState('no_tx')   # nothing to mine; lets /block/miningStatus explain why no block appeared
         return
 
     timestamp = time.time()
@@ -290,7 +314,7 @@ def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
 
     print('Mining a block...')
 
-    while not newBlockFound:
+    while not newBlockFound:     # PoW loop runs OUTSIDE the lock (spec: never hold lock during long work)
         newBlockAttempt = generateNextBlock(blockchain, strTxData, timestamp, proof)
         if newBlockAttempt.currentHash[0:difficulty] == '0' * difficulty:
             stopTime = time.time()
@@ -302,9 +326,16 @@ def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
 
     blockchain.append(newBlockAttempt)
     writeBlockchain(blockchain)
+    # call after writeBlockchain returns: writeBlockchain takes `lock` itself, so never call it inside `with lock:`
+    setMiningState('success', index=newBlockAttempt.index, proof=proof, seconds=round(timer, 2))
 
 def mine():
-    mineNewBlock()
+    try:
+        mineNewBlock()
+    except Exception as e:
+        # without this, an exception would leave state == 'mining' forever and every later call would get 409
+        print(f"mining error: {e}")
+        setMiningState('error')
 
 def isSameBlock(block1, block2):
     if str(block1.index) != str(block2.index):
