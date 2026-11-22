@@ -327,6 +327,8 @@ def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
     blockchain.append(newBlockAttempt)
     writeBlockchain(blockchain)
     # call after writeBlockchain returns: writeBlockchain takes `lock` itself, so never call it inside `with lock:`
+    # known limitation: writeBlockchain silently returns on an index mismatch without saving,
+    # so the state can be 'success' even if the block was not written (out of scope for this task)
     setMiningState('success', index=newBlockAttempt.index, proof=proof, seconds=round(timer, 2))
 
 def mine():
@@ -767,6 +769,13 @@ class myHandler(BaseHTTPRequestHandler):
                     self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
 
             elif None != re.search('/block/generateBlock', self.path):
+                if not startMining():           # False면 이미 채굴 중
+                    self.send_response(409)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(bytes(json.dumps({"error": "mining already in progress"}), "utf-8"))
+                    return                      # 아래 200응답이 또 나가지 않게
+
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
@@ -774,6 +783,16 @@ class myHandler(BaseHTTPRequestHandler):
                 t.start()
                 data.append("{mining is underway:check later by calling /block/getBlockData}")
                 self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
+
+            elif urlparse(self.path).path == '/block/miningStatus':
+              # copy the dict inside the lock, send the response outside of it (never write to the socket while holding the lock)
+                with lock:
+                    snapshot = dict(g_miningState)
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(bytes(json.dumps({"result": snapshot}), "utf-8"))
+
             else:
                 self.send_response(404)
                 self.send_header('Content-type', 'application/json')
