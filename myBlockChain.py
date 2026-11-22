@@ -30,6 +30,14 @@ g_receiveNewBlock = "/node/receiveNewBlock"
 g_difficulty = 5
 g_maximumTry = 100
 g_nodeList = {'127.0.0.1':'8668'} # trusted server list, should be checked manually
+g_maxTxPerBlock = 10        # max number of transactions per block (remaining tx are mined in the next block)
+g_miningState = {           # current mining status; read/write only while holding `lock`
+    'state': 'idle',        # idle / mining / success / no_tx / error
+    'index': None,          # set only when state == 'success'
+    'proof': None,          # set only when state == 'success'
+    'seconds': None,        # set only when state == 'success'
+    'updatedAt': time.time(),  # refreshed on every state change
+}
 
 
 class Block:
