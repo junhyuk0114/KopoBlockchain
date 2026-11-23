@@ -89,6 +89,11 @@ def generateNextBlock(blockchain, blockData, timestamp, proof):
 # prevents server overload due to repeated error message output and gives 3 seconds of delay to allow time for other users to wait without opening file while editing and saving csv file.
 def writeBlockchain(blockchain):
 
+    # 빈 체인이면 저장할 것이 없으므로 바로 종료 (무한루프·IndexError 방지)
+    if not blockchain:
+        print("writeBlockchain: blockchain is empty")
+        return False
+
     blockchainList = []
 
     for block in blockchain:
@@ -136,8 +141,6 @@ def writeBlockchain(blockchain):
                     time.sleep(3)
                     print("writeBlockchain file open error")
                     lock.release()
-        else:
-            print("Blockchain is empty")
 
 def readBlockchain(blockchainFilePath, mode = 'internal'):
     print("readBlockchain")
