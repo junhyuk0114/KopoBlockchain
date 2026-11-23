@@ -16,11 +16,8 @@ from tempfile import NamedTemporaryFile
 import shutil
 import requests # for sending new block to other nodes
 
-# 20190605 /(YuRim Kim, HaeRi Kim, JongSun Park, BohKuk Suh , HyeongSeob Lee, JinWoo Song)
-from multiprocessing import Process, Lock # for using Lock method(acquire(), release())
-
-# for Put Lock objects into variables(lock)
-lock = Lock()
+# 스레드 기반 서버에 맞게 threading 모듈 사용, 중첩 호출 시 자기 데드락 방지
+lock = threading.RLock()
 
 PORT_NUMBER = 8666
 g_txFileName = "txData.csv"
@@ -30,6 +27,8 @@ g_receiveNewBlock = "/node/receiveNewBlock"
 g_difficulty = 5
 g_maximumTry = 100
 g_nodeList = {'127.0.0.1':'8668'} # trusted server list, should be checked manually
+g_fileRetry = 5  # 파일 저장 최대 재시도 횟수
+g_fileRetryDelay = 1 # 재시도 간격(초)
 
 
 class Block:
@@ -88,7 +87,22 @@ def generateNextBlock(blockchain, blockData, timestamp, proof):
 # After executing the desired operation, changed to release the lock.(lock.release())
 # Reason for time.sleep ():
 # prevents server overload due to repeated error message output and gives 3 seconds of delay to allow time for other users to wait without opening file while editing and saving csv file.
+def readLastBlockIndex(filePath):
+  with open(filePath, 'r', newline='') as file:
+      rows = [row for row in csv.reader(file) if row]  # 빈 줄 제외
+  if not rows:
+      return None
+  lastRow = rows[-1]
+  if len(lastRow) != 6:
+      raise ValueError(f"마지막 줄 칸 수가 6이 아님: {len(lastRow)}")
+  return int(lastRow[0])  # 숫자가 아니면 ValueError
+
 def writeBlockchain(blockchain):
+
+    # 빈 체인이면 저장할 것이 없으므로 바로 종료 (무한루프·IndexError 방지)
+    if not blockchain:
+        print("writeBlockchain: blockchain is empty")
+        return False
 
     blockchainList = []
 
@@ -97,72 +111,87 @@ def writeBlockchain(blockchain):
         blockList = [block.index, block.previousHash, str(block.timestamp), block.data, block.currentHash,block.proof ]
         blockchainList.append(blockList)
 
-    #[STARAT] check current db(csv) if broadcasted block data has already been updated
-    try:
-        with open(g_bcFileName, 'r',  newline='') as file:
-            blockReader = csv.reader(file)
-            last_line_number = row_count(g_bcFileName)
-            for line in blockReader:
-                if blockReader.line_num == last_line_number:
-                    lastBlock = Block(line[0], line[1], line[2], line[3], line[4], line[5])
 
-        if int(lastBlock.index) + 1 != int(blockchainList[-1][0]):
-            print("index sequence mismatch")
-            if int(lastBlock.index) == int(blockchainList[-1][0]):
-                print("db(csv) has already been updated")
-            return
-    except:
-        print("file open error in check current db(csv) \n or maybe there's some other reason")
-        pass
-        #return
-    # [END] check current db(csv)
-    openFile = False
-    while not openFile:
-        if blockchainList != []:
-            try:
-                lock.acquire()
+    # 새로 저장하려는 체인의 마지막 블록 index
+    newLastIndex = int(blockchainList[-1][0])
+
+    # [파일 저장] 최대 g_fileRetry 번 시도, 실패 시 g_fileRetryDelay 초 대기 후 재시도
+    saved = False
+    for attempt in range(1, g_fileRetry + 1):
+        try:
+            with lock:  # 블록을 벗어나면 예외가 나도 자동 해제
+                try:
+                    lastIndex = readLastBlockIndex(g_bcFileName)
+                except FileNotFoundError:
+                    lastIndex = None # 파일 없음 = 최초 생성
+                except (ValueError, IndexError) as e:
+                    print(f"writeBlockchain aborted: blockchain.csv 형식 오류 ({e})")
+                    return False
+
+                if lastIndex is not None and lastIndex + 1 != newLastIndex:
+                    if lastIndex == newLastIndex:
+                        print("writeBlockchain aborted: db(csv) has already been updated")
+                    else:
+                        print(
+                            f"writeBlockchain aborted: index sequence mismatch (file={lastIndex}, new={newLastIndex})")
+                    return False
+
                 with open(g_bcFileName, "w", newline='') as file:
                     writer = csv.writer(file)
                     writer.writerows(blockchainList)
-                    blockchainList.clear()
-                    print("write ok")
-                    openFile = True
-                    for block in blockchain:
-                        updateTx(block)
-                    print('Blockchain written to blockchain.csv.')
-                    print('Broadcasting new block to other nodes')
-                    broadcastNewBlock(blockchain)
-                    lock.release()
-            except:
-                    time.sleep(3)
-                    print("writeBlockchain file open error")
-                    lock.release()
-        else:
-            print("Blockchain is empty")
+            saved = True
+            print("write ok")
+            break
+        except OSError as e:
+            print(f"writeBlockchain file open error ({attempt}/{g_fileRetry}): {e}")
+            if attempt < g_fileRetry:
+                time.sleep(g_fileRetryDelay)  # lock 밖에서 대기
+
+    if not saved:
+        print("writeBlockchain failed: retry limit exceeded")
+        return False
+
+    # [저장 성공 후 처리] 재시도 루프 밖에서 1번만 실행
+    for block in blockchain:
+        updateTx(block)
+    print("Blockchain written to blockchain.csv.")
+    print("Broadcasting new block to other nodes")
+    broadcastNewBlock(blockchain)
+    return True
+
 
 def readBlockchain(blockchainFilePath, mode = 'internal'):
     print("readBlockchain")
     importedBlockchain = []
 
     try:
-        with open(blockchainFilePath, 'r',  newline='') as file:
-            blockReader = csv.reader(file)
-            for line in blockReader:
-                block = Block(line[0], line[1], line[2], line[3], line[4], line[5])
-                importedBlockchain.append(block)
+        with lock: # 저장 중인 파일을 중간에 읽지 않도록 잠금
+            with open(blockchainFilePath, 'r',  newline='') as file:
+                blockReader = csv.reader(file)
+                for line in blockReader:
+                    if not line:
+                        continue # 빈줄 건너뛰기
+                    if len(line) != 6:
+                        raise ValueError(f"{blockReader.line_num}번째 줄 칸 수가 6이 아님: {len(line)}")
+                    importedBlockchain.append(Block(line[0], line[1], line[2], line[3], line[4], line[5]))
 
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, csv.Error) as e:
+        # 파일이 깨졌거나 읽을 수 없음 → 기존 데이터를 지키기 위해 파일은 건드리지 않음
+        print(f"readBlockchain failed: {blockchainFilePath} 읽기 오류 ({e}) - 파일은 변경하지 않음")
+        return None
+
+    if importedBlockchain:
         print("Pulling blockchain from csv...")
-
         return importedBlockchain
 
-    except:
-        if mode == 'internal' :
-            blockchain = generateGenesisBlock()
-            importedBlockchain.append(blockchain)
-            writeBlockchain(importedBlockchain)
-            return importedBlockchain
-        else :
-            return None
+    # 파일이 없거나 비어 있는 경우에만 제네시스 블록 생성
+    if mode == 'internal':
+        genesis = generateGenesisBlock()
+        if writeBlockchain([genesis]):
+            return [genesis]
+    return None
 
 def updateTx(blockData) :
 
@@ -271,6 +300,9 @@ def getTxData():
 
 def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
     blockchain = readBlockchain(blockchainPath)
+    if blockchain is None:
+        print('blockchain.csv read error. Mining aborted')
+        return
     strTxData = getTxData()
     if strTxData == '' :
         print('No TxData Found. Mining aborted')
@@ -349,6 +381,9 @@ def newtx(txToMining):
 def isValidChain(bcToValidate):
     genesisBlock = []
     bcToValidateForBlock = []
+    # return False if the given chain is empty or not a list (prevents IndexError)
+    if not isinstance(bcToValidate, list) or len(bcToValidate) == 0:
+        return False
 
     # Read GenesisBlock
     try:
@@ -357,17 +392,29 @@ def isValidChain(bcToValidate):
             for line in blockReader:
                 block = Block(line[0], line[1], line[2], line[3], line[4], line[5])
                 genesisBlock.append(block)
-#                break
+                # read only the genesis block (first line) of the local chain
+                break
     except:
         print("file open error in isValidChain")
         return False
 
     # transform given data to Block object
-    for line in bcToValidate:
-        # print(type(line))
-        # index, previousHash, timestamp, data, currentHash, proof
-        block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
-        bcToValidateForBlock.append(block)
+    # for line in bcToValidate:
+    #     # print(type(line))
+    #     # index, previousHash, timestamp, data, currentHash, proof
+    #     block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
+    #     bcToValidateForBlock.append(block)
+
+    # return False instead of raising KeyError when a field is missing
+    try:
+        for line in bcToValidate:
+            # print(type(line))
+            # index, previousHash, timestamp, data, currentHash, proof
+            block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
+            bcToValidateForBlock.append(block)
+    except (KeyError, TypeError) as e:
+        print(f"invalid block data in isValidChain: {e}")
+        return False
 
     #if it fails to read block data  from db(csv)
     if not genesisBlock:
@@ -385,10 +432,24 @@ def isValidChain(bcToValidate):
     #        tempBlocks.append(bcToValidateForBlock[i])
     #    else:
     #        return False
+    # validate links, hashes and proof of work of each block
+    # return False if int() in isValidNewBlock raises ValueError (non-numeric index)
+    try:
+        tempBlocks = [bcToValidateForBlock[0]]
+        for i in range(1, len(bcToValidateForBlock)):
+            if isValidNewBlock(bcToValidateForBlock[i], tempBlocks[i - 1]):
+                tempBlocks.append(bcToValidateForBlock[i])
+            else:
+                return False
+    except ValueError as e:
+        print(f"invalid block value in isValidChain: {e}")
+        return False
 
-    for i in range(0, len(bcToValidateForBlock)):
-        if isSameBlock(genesisBlock[i], bcToValidateForBlock[i]) == False:
-            return False
+    # removed: raises IndexError when the given chain is longer than the local chain
+    # replaced by the link validation above
+    # for i in range(0, len(bcToValidateForBlock)):
+    #     if isSameBlock(genesisBlock[i], bcToValidateForBlock[i]) == False:
+    #         return False
 
     return True
 
