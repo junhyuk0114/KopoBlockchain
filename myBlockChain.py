@@ -390,6 +390,9 @@ def newtx(txToMining):
 def isValidChain(bcToValidate):
     genesisBlock = []
     bcToValidateForBlock = []
+    # return False if the given chain is empty or not a list (prevents IndexError)
+    if not isinstance(bcToValidate, list) or len(bcToValidate) == 0:
+        return False
 
     # Read GenesisBlock
     try:
@@ -398,17 +401,29 @@ def isValidChain(bcToValidate):
             for line in blockReader:
                 block = Block(line[0], line[1], line[2], line[3], line[4], line[5])
                 genesisBlock.append(block)
-#                break
+                # read only the genesis block (first line) of the local chain
+                break
     except:
         print("file open error in isValidChain")
         return False
 
     # transform given data to Block object
-    for line in bcToValidate:
-        # print(type(line))
-        # index, previousHash, timestamp, data, currentHash, proof
-        block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
-        bcToValidateForBlock.append(block)
+    # for line in bcToValidate:
+    #     # print(type(line))
+    #     # index, previousHash, timestamp, data, currentHash, proof
+    #     block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
+    #     bcToValidateForBlock.append(block)
+
+    # return False instead of raising KeyError when a field is missing
+    try:
+        for line in bcToValidate:
+            # print(type(line))
+            # index, previousHash, timestamp, data, currentHash, proof
+            block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
+            bcToValidateForBlock.append(block)
+    except (KeyError, TypeError) as e:
+        print(f"invalid block data in isValidChain: {e}")
+        return False
 
     #if it fails to read block data  from db(csv)
     if not genesisBlock:
@@ -426,10 +441,24 @@ def isValidChain(bcToValidate):
     #        tempBlocks.append(bcToValidateForBlock[i])
     #    else:
     #        return False
+    # validate links, hashes and proof of work of each block
+    # return False if int() in isValidNewBlock raises ValueError (non-numeric index)
+    try:
+        tempBlocks = [bcToValidateForBlock[0]]
+        for i in range(1, len(bcToValidateForBlock)):
+            if isValidNewBlock(bcToValidateForBlock[i], tempBlocks[i - 1]):
+                tempBlocks.append(bcToValidateForBlock[i])
+            else:
+                return False
+    except ValueError as e:
+        print(f"invalid block value in isValidChain: {e}")
+        return False
 
-    for i in range(0, len(bcToValidateForBlock)):
-        if isSameBlock(genesisBlock[i], bcToValidateForBlock[i]) == False:
-            return False
+    # removed: raises IndexError when the given chain is longer than the local chain
+    # replaced by the link validation above
+    # for i in range(0, len(bcToValidateForBlock)):
+    #     if isSameBlock(genesisBlock[i], bcToValidateForBlock[i]) == False:
+    #         return False
 
     return True
 
