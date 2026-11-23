@@ -16,11 +16,8 @@ from tempfile import NamedTemporaryFile
 import shutil
 import requests # for sending new block to other nodes
 
-# 20190605 /(YuRim Kim, HaeRi Kim, JongSun Park, BohKuk Suh , HyeongSeob Lee, JinWoo Song)
-from multiprocessing import Process, Lock # for using Lock method(acquire(), release())
-
-# for Put Lock objects into variables(lock)
-lock = Lock()
+# 스레드 기반 서버에 맞게 threading 모듈 사용, 중첩 호출 시 자기 데드락 방지
+lock = threading.RLock()
 
 PORT_NUMBER = 8666
 g_txFileName = "txData.csv"
@@ -30,6 +27,8 @@ g_receiveNewBlock = "/node/receiveNewBlock"
 g_difficulty = 5
 g_maximumTry = 100
 g_nodeList = {'127.0.0.1':'8668'} # trusted server list, should be checked manually
+g_fileRetry = 5  # 파일 저장 최대 재시도 횟수
+g_fileRetryDelay = 1 # 재시도 간격(초)
 
 
 class Block:
