@@ -690,14 +690,30 @@ def initSvr():
 # a browser
 class myHandler(BaseHTTPRequestHandler):
 
-    #def __init__(self, request, client_address, server):
-    #    BaseHTTPRequestHandler.__init__(self, request, client_address, server)
-
     def send_json(self, code, body):
+        # 상태 코드 + JSON 헤더 + 본문을 한 번만 전송
         self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.end_headers()
-        self.wfile.write(json.dumps(body).encode('utf-8'))
+        self.wfile.write(json.dumps(body, sort_keys=True, indent=4, ensure_ascii=False).encode('utf-8'))
+
+    def read_json_body(self):
+        # Content-Type 오류: 
+        # (None, 415) / JSON·길이 오류: (None, 400) / 성공: (데이터, 200)
+        ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        if ctype != 'application/json':
+            return None, 415
+
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length <= 0:
+                return None, 400
+            post_data = self.rfile.read(content_length)
+            received_data = post_data.decode('utf-8')
+            parsed = json.loads(received_data)
+            return parsed, 200
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None, 400
 
     # Handler for the GET requests
     def do_GET(self):
