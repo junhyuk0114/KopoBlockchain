@@ -16,11 +16,8 @@ from tempfile import NamedTemporaryFile
 import shutil
 import requests # for sending new block to other nodes
 
-# 20190605 /(YuRim Kim, HaeRi Kim, JongSun Park, BohKuk Suh , HyeongSeob Lee, JinWoo Song)
-from multiprocessing import Process, Lock # for using Lock method(acquire(), release())
-
-# for Put Lock objects into variables(lock)
-lock = Lock()
+# 잠금: 전역 lock = threading.Lock() 하나만 사용 (multiprocessing.Lock에서 교체)
+lock = threading.Lock()
 
 PORT_NUMBER = 8666
 g_txFileName = "txData.csv"
@@ -31,6 +28,9 @@ g_difficulty = 5
 g_maximumTry = 100
 g_nodeList = {'127.0.0.1':'8668'} # trusted server list, should be checked manually
 
+# [신규 설정값] 명세서 4장 기준
+g_maxTxPerRequest = 5
+g_maxTxPerBlock = 10
 
 class Block:
 
@@ -692,6 +692,12 @@ class myHandler(BaseHTTPRequestHandler):
 
     #def __init__(self, request, client_address, server):
     #    BaseHTTPRequestHandler.__init__(self, request, client_address, server)
+
+    def send_json(self, code, body):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode('utf-8'))
 
     # Handler for the GET requests
     def do_GET(self):
