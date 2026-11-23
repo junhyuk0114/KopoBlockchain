@@ -15,6 +15,7 @@ import uuid
 from tempfile import NamedTemporaryFile
 import shutil
 import requests # for sending new block to other nodes
+import os
 
 # 20190605 /(YuRim Kim, HaeRi Kim, JongSun Park, BohKuk Suh , HyeongSeob Lee, JinWoo Song)
 from multiprocessing import Process, Lock # for using Lock method(acquire(), release())
@@ -188,57 +189,75 @@ def updateTx(blockData) :
     tempfile.close()
     print('txData updated')
 
-# 20190605 /(YuRim Kim, HaeRi Kim, JongSun Park, BohKuk Suh , HyeongSeob Lee, JinWoo Song)
-# /* writeTx function Update */
-# If the 'txData.csv' file is already open, make it inaccessible via lock.acquire()
-# After executing the desired operation, changed to release the lock.(lock.release())
-# Reason for time.sleep ():
-# prevents server overload due to repeated error message output and gives 3 seconds of delay to allow time for other users to wait without opening file while editing and saving csv file.
-# Removed temp files to reduce memory usage and increase work efficiency.
 def writeTx(txRawData):
+    """
+    [개선된 writeTx] 
+    1. 입력값 검증 (필수값 누락, 음수, 문자 금액 차단)
+    2. 파일 읽기부터 쓰기까지 전체 과정을 Lock으로 보호하여 동시성 문제(Lost Update) 해결
+    """
     print(g_txFileName)
-    txDataList = []
-    txOriginalList = []
-    for txDatum in txRawData:
-        txList = [txDatum.commitYN, txDatum.sender, txDatum.amount, txDatum.receiver, txDatum.uuid]
-        txDataList.append(txList)
-
+    
+    # 1. 입력값 검증 (필수값 누락, 음수, 문자열 금액 검사)
     try:
-        with open(g_txFileName, 'r', newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            for row in reader:
-                txOriginalList.append(row)
+        txDataList = []
+        for txDatum in txRawData:
+            # 필수값 및 타입 검증
+            sender = getattr(txDatum, 'sender', None)
+            receiver = getattr(txDatum, 'receiver', None)
+            amount = getattr(txDatum, 'amount', None)
+            commitYN = getattr(txDatum, 'commitYN', 'N')
+            uuid_val = getattr(txDatum, 'uuid', '')
 
-            openWriteTx = False
-            while not openWriteTx:
-                lock.acquire()
-                try:
-                    print("NewTxData lock.acquire")
-                    with open(g_txFileName, 'w', newline='') as csvfile:
-                        writer = csv.writer(csvfile)
-                        # adding new tx
-                        writer.writerows(txOriginalList)
-                        writer.writerows(txDataList)
-                        print("writeTx write ok")
-                        csvfile.close()
-                        openWriteTx = True
-                        lock.release()
+            if not sender or not receiver or amount is None:
+                print("Validation Error: Missing required fields (sender, receiver, or amount)")
+                return -2
 
-                except Exception as e:
-                    print(e)
-                    time.sleep(3)
-                    print("file open error")
-                    lock.release()
-    except:
-        # this is 1st time of creating txFile
+            # 금액이 숫자로 변환 가능한지, 그리고 음수가 아닌지 검증
+            try:
+                num_amount = float(amount)
+                if num_amount < 0:
+                    print("Validation Error: Amount cannot be negative")
+                    return -2
+            except ValueError:
+                print("Validation Error: Amount must be a valid number")
+                return -2
+
+            txList = [commitYN, sender, str(num_amount), receiver, uuid_val]
+            txDataList.append(txList)
+            
+    except Exception as e:
+        print(f"Validation Exception: {e}")
+        return -2
+
+    # 2. 파일 읽기/쓰기 전체를 Lock으로 감싸 동시성 문제(Lost Update) 원천 차단
+    # 기존 코드처럼 Lock 바깥에서 파일을 읽으면, 다른 요청이 끼어들면서 기존 거래 내역이 증발함.
+    with lock:
         try:
-            with open(g_txFileName, "w", newline='') as file:
-                writer = csv.writer(file)
-                writer.writerows(txDataList)
-        except:
-            return 0
-    return 1
-    print('txData written to txData.csv.')
+            txOriginalList = []
+            
+            # 파일이 존재하면 기존 거래 목록 읽기
+            if os.path.exists(g_txFileName):
+                with open(g_txFileName, 'r', newline='', encoding='utf-8') as csvfile:
+                    reader = csv.reader(csvfile)
+                    for row in reader:
+                        if row:  # 빈 줄 방지
+                            txOriginalList.append(row)
+
+            # 기존 데이터에 새로운 거래 내역 합치기
+            txOriginalList.extend(txDataList)
+
+            # 파일에 최종 쓰기
+            with open(g_txFileName, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerows(txOriginalList)
+                print("writeTx write ok")
+
+            print('txData written to txData.csv.')
+            return 1
+
+        except Exception as e:
+            print(f"File I/O Error during writeTx: {e}")
+            return -2
 
 def readTx(txFilePath):
     print("readTx")
