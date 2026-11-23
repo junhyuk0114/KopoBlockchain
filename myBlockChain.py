@@ -119,28 +119,35 @@ def writeBlockchain(blockchain):
         print("file open error in check current db(csv) \n or maybe there's some other reason")
         pass
         #return
-    # [END] check current db(csv)
-    openFile = False
-    while not openFile:
-        if blockchainList != []:
-            try:
-                lock.acquire()
+
+    # [파일 저장] 최대 g_fileRetry 번 시도, 실패 시 g_fileRetryDelay 초 대기 후 재시도
+    saved = False
+    for attempt in range(1, g_fileRetry + 1):
+        try:
+            with lock:  # 블록을 벗어나면 예외가 나도 자동 해제
                 with open(g_bcFileName, "w", newline='') as file:
                     writer = csv.writer(file)
                     writer.writerows(blockchainList)
-                    blockchainList.clear()
-                    print("write ok")
-                    openFile = True
-                    for block in blockchain:
-                        updateTx(block)
-                    print('Blockchain written to blockchain.csv.')
-                    print('Broadcasting new block to other nodes')
-                    broadcastNewBlock(blockchain)
-                    lock.release()
-            except:
-                    time.sleep(3)
-                    print("writeBlockchain file open error")
-                    lock.release()
+            saved = True
+            print("write ok")
+            break
+        except OSError as e:
+            print(f"writeBlockchain file open error ({attempt}/{g_fileRetry}): {e}")
+            if attempt < g_fileRetry:
+                time.sleep(g_fileRetryDelay)  # lock 밖에서 대기
+
+    if not saved:
+        print("writeBlockchain failed: retry limit exceeded")
+        return False
+
+    # [저장 성공 후 처리] 재시도 루프 밖에서 1번만 실행
+    for block in blockchain:
+        updateTx(block)
+    print("Blockchain written to blockchain.csv.")
+    print("Broadcasting new block to other nodes")
+    broadcastNewBlock(blockchain)
+    return True
+
 
 def readBlockchain(blockchainFilePath, mode = 'internal'):
     print("readBlockchain")
