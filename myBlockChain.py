@@ -165,24 +165,33 @@ def readBlockchain(blockchainFilePath, mode = 'internal'):
     importedBlockchain = []
 
     try:
-        with open(blockchainFilePath, 'r',  newline='') as file:
-            blockReader = csv.reader(file)
-            for line in blockReader:
-                block = Block(line[0], line[1], line[2], line[3], line[4], line[5])
-                importedBlockchain.append(block)
+        with lock: # 저장 중인 파일을 중간에 읽지 않도록 잠금
+            with open(blockchainFilePath, 'r',  newline='') as file:
+                blockReader = csv.reader(file)
+                for line in blockReader:
+                    if not line:
+                        continue # 빈줄 건너뛰기
+                    if len(line) != 6:
+                        raise ValueError(f"{blockReader.line_num}번째 줄 칸 수가 6이 아님: {len(line)}")
+                    importedBlockchain.append(Block(line[0], line[1], line[2], line[3], line[4], line[5]))
 
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, csv.Error) as e:
+        # 파일이 깨졌거나 읽을 수 없음 → 기존 데이터를 지키기 위해 파일은 건드리지 않음
+        print(f"readBlockchain failed: {blockchainFilePath} 읽기 오류 ({e}) - 파일은 변경하지 않음")
+        return None
+
+    if importedBlockchain:
         print("Pulling blockchain from csv...")
-
         return importedBlockchain
 
-    except:
-        if mode == 'internal' :
-            blockchain = generateGenesisBlock()
-            importedBlockchain.append(blockchain)
-            writeBlockchain(importedBlockchain)
-            return importedBlockchain
-        else :
-            return None
+    # 파일이 없거나 비어 있는 경우에만 제네시스 블록 생성
+    if mode == 'internal':
+        genesis = generateGenesisBlock()
+        if writeBlockchain([genesis]):
+            return [genesis]
+    return None
 
 def updateTx(blockData) :
 
@@ -291,6 +300,9 @@ def getTxData():
 
 def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
     blockchain = readBlockchain(blockchainPath)
+    if blockchain is None:
+        print('blockchain.csv read error. Mining aborted')
+        return
     strTxData = getTxData()
     if strTxData == '' :
         print('No TxData Found. Mining aborted')
