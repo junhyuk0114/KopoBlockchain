@@ -87,6 +87,16 @@ def generateNextBlock(blockchain, blockData, timestamp, proof):
 # After executing the desired operation, changed to release the lock.(lock.release())
 # Reason for time.sleep ():
 # prevents server overload due to repeated error message output and gives 3 seconds of delay to allow time for other users to wait without opening file while editing and saving csv file.
+def readLastBlockIndex(filePath):
+  with open(filePath, 'r', newline='') as file:
+      rows = [row for row in csv.reader(file) if row]  # 빈 줄 제외
+  if not rows:
+      return None
+  lastRow = rows[-1]
+  if len(lastRow) != 6:
+      raise ValueError(f"마지막 줄 칸 수가 6이 아님: {len(lastRow)}")
+  return int(lastRow[0])  # 숫자가 아니면 ValueError
+
 def writeBlockchain(blockchain):
 
     # 빈 체인이면 저장할 것이 없으므로 바로 종료 (무한루프·IndexError 방지)
@@ -101,30 +111,31 @@ def writeBlockchain(blockchain):
         blockList = [block.index, block.previousHash, str(block.timestamp), block.data, block.currentHash,block.proof ]
         blockchainList.append(blockList)
 
-    #[STARAT] check current db(csv) if broadcasted block data has already been updated
-    try:
-        with open(g_bcFileName, 'r',  newline='') as file:
-            blockReader = csv.reader(file)
-            last_line_number = row_count(g_bcFileName)
-            for line in blockReader:
-                if blockReader.line_num == last_line_number:
-                    lastBlock = Block(line[0], line[1], line[2], line[3], line[4], line[5])
 
-        if int(lastBlock.index) + 1 != int(blockchainList[-1][0]):
-            print("index sequence mismatch")
-            if int(lastBlock.index) == int(blockchainList[-1][0]):
-                print("db(csv) has already been updated")
-            return
-    except:
-        print("file open error in check current db(csv) \n or maybe there's some other reason")
-        pass
-        #return
+    # 새로 저장하려는 체인의 마지막 블록 index
+    newLastIndex = int(blockchainList[-1][0])
 
     # [파일 저장] 최대 g_fileRetry 번 시도, 실패 시 g_fileRetryDelay 초 대기 후 재시도
     saved = False
     for attempt in range(1, g_fileRetry + 1):
         try:
             with lock:  # 블록을 벗어나면 예외가 나도 자동 해제
+                try:
+                    lastIndex = readLastBlockIndex(g_bcFileName)
+                except FileNotFoundError:
+                    lastIndex = None # 파일 없음 = 최초 생성
+                except (ValueError, IndexError) as e:
+                    print(f"writeBlockchain aborted: blockchain.csv 형식 오류 ({e})")
+                    return False
+
+                if lastIndex is not None and lastIndex + 1 != newLastIndex:
+                    if lastIndex == newLastIndex:
+                        print("writeBlockchain aborted: db(csv) has already been updated")
+                    else:
+                        print(
+                            f"writeBlockchain aborted: index sequence mismatch (file={lastIndex}, new={newLastIndex})")
+                    return False
+
                 with open(g_bcFileName, "w", newline='') as file:
                     writer = csv.writer(file)
                     writer.writerows(blockchainList)
