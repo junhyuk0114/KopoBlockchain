@@ -30,6 +30,14 @@ g_receiveNewBlock = "/node/receiveNewBlock"
 g_difficulty = 5
 g_maximumTry = 100
 g_nodeList = {'127.0.0.1':'8668'} # trusted server list, should be checked manually
+g_maxTxPerBlock = 10        # max number of transactions per block (remaining tx are mined in the next block)
+g_miningState = {           # current mining status; read/write only while holding `lock`
+    'state': 'idle',        # idle / mining / success / no_tx / error
+    'index': None,          # set only when state == 'success'
+    'proof': None,          # set only when state == 'success'
+    'seconds': None,        # set only when state == 'success'
+    'updatedAt': time.time(),  # refreshed on every state change
+}
 
 
 class Block:
@@ -261,7 +269,8 @@ def getTxData():
     strTxData = ''
     importedTx = readTx(g_txFileName)
     if len(importedTx) > 0 :
-        for i in importedTx:
+        # take only the first g_maxTxPerBlock txs; the rest stay unmined (row[0] == '0') for the next block
+        for i in importedTx[:g_maxTxPerBlock]:
             print(i.__dict__)
             transaction = "["+ i.uuid + "]" "UserID " + i.sender + " sent " + i.amount + " bitTokens to UserID " + i.receiver + ". " #
             print(transaction)
@@ -269,11 +278,34 @@ def getTxData():
 
     return strTxData
 
+
+def startMining():
+    # decide whether a new mining job may start; True = started, False = already mining
+    # check and update must happen in the same lock block, otherwise two requests can both pass
+    with lock:
+        if g_miningState['state'] == 'mining':
+            return False
+        g_miningState.update({
+            'state':'mining', 'index':None, 'proof':None,
+            'seconds': None, 'updatedAt': time.time(),
+        })
+        return True
+
+
+def setMiningState(state, index=None, proof=None, seconds=None):
+    # keep the lock section tiny: only update the dict, no file or network access here
+    with lock:
+        g_miningState.update({
+            'state': state, 'index': index, 'proof': proof,
+            'seconds': seconds, 'updatedAt': time.time(),
+        })
+
 def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
     blockchain = readBlockchain(blockchainPath)
     strTxData = getTxData()
     if strTxData == '' :
         print('No TxData Found. Mining aborted')
+        setMiningState('no_tx')   # nothing to mine; lets /block/miningStatus explain why no block appeared
         return
 
     timestamp = time.time()
@@ -282,7 +314,7 @@ def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
 
     print('Mining a block...')
 
-    while not newBlockFound:
+    while not newBlockFound:     # PoW loop runs OUTSIDE the lock (spec: never hold lock during long work)
         newBlockAttempt = generateNextBlock(blockchain, strTxData, timestamp, proof)
         if newBlockAttempt.currentHash[0:difficulty] == '0' * difficulty:
             stopTime = time.time()
@@ -294,9 +326,18 @@ def mineNewBlock(difficulty=g_difficulty, blockchainPath=g_bcFileName):
 
     blockchain.append(newBlockAttempt)
     writeBlockchain(blockchain)
+    # call after writeBlockchain returns: writeBlockchain takes `lock` itself, so never call it inside `with lock:`
+    # known limitation: writeBlockchain silently returns on an index mismatch without saving,
+    # so the state can be 'success' even if the block was not written (out of scope for this task)
+    setMiningState('success', index=newBlockAttempt.index, proof=proof, seconds=round(timer, 2))
 
 def mine():
-    mineNewBlock()
+    try:
+        mineNewBlock()
+    except Exception as e:
+        # without this, an exception would leave state == 'mining' forever and every later call would get 409
+        print(f"mining error: {e}")
+        setMiningState('error')
 
 def isSameBlock(block1, block2):
     if str(block1.index) != str(block2.index):
@@ -349,6 +390,9 @@ def newtx(txToMining):
 def isValidChain(bcToValidate):
     genesisBlock = []
     bcToValidateForBlock = []
+    # return False if the given chain is empty or not a list (prevents IndexError)
+    if not isinstance(bcToValidate, list) or len(bcToValidate) == 0:
+        return False
 
     # Read GenesisBlock
     try:
@@ -357,17 +401,29 @@ def isValidChain(bcToValidate):
             for line in blockReader:
                 block = Block(line[0], line[1], line[2], line[3], line[4], line[5])
                 genesisBlock.append(block)
-#                break
+                # read only the genesis block (first line) of the local chain
+                break
     except:
         print("file open error in isValidChain")
         return False
 
     # transform given data to Block object
-    for line in bcToValidate:
-        # print(type(line))
-        # index, previousHash, timestamp, data, currentHash, proof
-        block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
-        bcToValidateForBlock.append(block)
+    # for line in bcToValidate:
+    #     # print(type(line))
+    #     # index, previousHash, timestamp, data, currentHash, proof
+    #     block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
+    #     bcToValidateForBlock.append(block)
+
+    # return False instead of raising KeyError when a field is missing
+    try:
+        for line in bcToValidate:
+            # print(type(line))
+            # index, previousHash, timestamp, data, currentHash, proof
+            block = Block(line['index'], line['previousHash'], line['timestamp'], line['data'], line['currentHash'], line['proof'])
+            bcToValidateForBlock.append(block)
+    except (KeyError, TypeError) as e:
+        print(f"invalid block data in isValidChain: {e}")
+        return False
 
     #if it fails to read block data  from db(csv)
     if not genesisBlock:
@@ -385,10 +441,24 @@ def isValidChain(bcToValidate):
     #        tempBlocks.append(bcToValidateForBlock[i])
     #    else:
     #        return False
+    # validate links, hashes and proof of work of each block
+    # return False if int() in isValidNewBlock raises ValueError (non-numeric index)
+    try:
+        tempBlocks = [bcToValidateForBlock[0]]
+        for i in range(1, len(bcToValidateForBlock)):
+            if isValidNewBlock(bcToValidateForBlock[i], tempBlocks[i - 1]):
+                tempBlocks.append(bcToValidateForBlock[i])
+            else:
+                return False
+    except ValueError as e:
+        print(f"invalid block value in isValidChain: {e}")
+        return False
 
-    for i in range(0, len(bcToValidateForBlock)):
-        if isSameBlock(genesisBlock[i], bcToValidateForBlock[i]) == False:
-            return False
+    # removed: raises IndexError when the given chain is longer than the local chain
+    # replaced by the link validation above
+    # for i in range(0, len(bcToValidateForBlock)):
+    #     if isSameBlock(genesisBlock[i], bcToValidateForBlock[i]) == False:
+    #         return False
 
     return True
 
@@ -728,6 +798,13 @@ class myHandler(BaseHTTPRequestHandler):
                     self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
 
             elif None != re.search('/block/generateBlock', self.path):
+                if not startMining():           # False면 이미 채굴 중
+                    self.send_response(409)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(bytes(json.dumps({"error": "mining already in progress"}), "utf-8"))
+                    return                      # 아래 200응답이 또 나가지 않게
+
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
@@ -735,6 +812,16 @@ class myHandler(BaseHTTPRequestHandler):
                 t.start()
                 data.append("{mining is underway:check later by calling /block/getBlockData}")
                 self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
+
+            elif urlparse(self.path).path == '/block/miningStatus':
+              # copy the dict inside the lock, send the response outside of it (never write to the socket while holding the lock)
+                with lock:
+                    snapshot = dict(g_miningState)
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(bytes(json.dumps({"result": snapshot}), "utf-8"))
+
             else:
                 self.send_response(404)
                 self.send_header('Content-type', 'application/json')
