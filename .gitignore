@@ -1,0 +1,14 @@
+# Python 
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Blockchain Data Files (CSV 파일 제외 대상)
+blockchain.csv
+txData.csv
+nodelst.csv

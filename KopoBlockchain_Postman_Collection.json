@@ -1,0 +1,88 @@
+{
+	"info": {
+		"name": "KopoBlockchain API Test",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "1. 전체 블록 조회 (getBlockData)",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8666/block/getBlockData",
+					"protocol": "http",
+					"host": ["localhost"],
+					"port": "8666",
+					"path": ["block", "getBlockData"]
+				}
+			}
+		},
+		{
+			"name": "2. 범위 지정 블록 조회 (from=1 & end=3)",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8666/block/getBlockData?from=1&end=3",
+					"protocol": "http",
+					"host": ["localhost"],
+					"port": "8666",
+					"path": ["block", "getBlockData"],
+					"query": [
+						{ "key": "from", "value": "1" },
+						{ "key": "end", "value": "3" }
+					]
+				}
+			}
+		},
+		{
+			"name": "3. 신규 거래 등록 (newtx)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{ "key": "Content-Type", "value": "application/json" }
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "[{\n    \"sender\": \"Chaewon\",\n    \"amount\": \"100\",\n    \"receiver\": \"Junhyuk\"\n}]"
+				},
+				"url": {
+					"raw": "http://localhost:8666/block/newtx",
+					"protocol": "http",
+					"host": ["localhost"],
+					"port": "8666",
+					"path": ["block", "newtx"]
+				}
+			}
+		},
+		{
+			"name": "4. 새 블록 채굴 (generateBlock)",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8666/block/generateBlock",
+					"protocol": "http",
+					"host": ["localhost"],
+					"port": "8666",
+					"path": ["block", "generateBlock"]
+				}
+			}
+		},
+		{
+			"name": "5. 등록된 노드 조회 (getNode)",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8666/node/getNode",
+					"protocol": "http",
+					"host": ["localhost"],
+					"port": "8666",
+					"path": ["node", "getNode"]
+				}
+			}
+		}
+	]
+}

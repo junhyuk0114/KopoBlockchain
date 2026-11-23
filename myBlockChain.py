@@ -41,7 +41,7 @@ class Block:
         self.data = data
         self.currentHash = currentHash
         self.proof = proof
-
+  
     def toJSON(self):
         return json.dumps(self, default=lambda o: o.__dict__, sort_keys=True, indent=4)
 
@@ -80,7 +80,6 @@ def generateNextBlock(blockchain, blockData, timestamp, proof):
     nextHash = calculateHash(nextIndex, previousBlock.currentHash, nextTimestamp, blockData, proof)
     # index, previousHash, timestamp, data, currentHash, proof
     return Block(nextIndex, previousBlock.currentHash, nextTimestamp, blockData, nextHash,proof)
-
 
 # 20190605 / (YuRim Kim, HaeRi Kim, JongSun Park, BohKuk Suh , HyeongSeob Lee, JinWoo Song)
 # /* WriteBlockchain function Update */
@@ -725,36 +724,36 @@ class myHandler(BaseHTTPRequestHandler):
     # Handler for the GET requests
     def do_GET(self):
         data = []  # response json data
+        parsed_url = urlparse(self.path) # 이 줄 추가
+        path = parsed_url.path
         if None != re.search('/block/*', self.path):
-            if None != re.search('/block/getBlockData', self.path):
-               # 20190605 / (kyuin Park, jiweon Lim, sunghoon Oh, sol Han )
-               # TODO : http://localhost:8666/block/getBlockData?from=1&end=10 -> from, end 문자열 검사
-               # 블록체인 갯수와 맞지 않는 경우 예외 처리 (예> 블록이 4개 존재, 요청은 10개)
-               # 블록 요청 from에 음수값, 0값 예외 처리
-                #queryString = urlparse(self.path).query.split('&')
-                #startPoint = int(queryString[0].split('=')[1]) - 1
-                #endPoint = int(queryString[1].split('=')[1])
-
+            # [홍채원 파트] 블록 조회 범위 조회 기능 (from / end 파라미터 처리)
+            if path == '/block/getBlockData':
                 try:
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
+                    block = readBlockchain(g_bcFileName, mode='external')
+                    if block is None or len(block) == 0:
+                        return self.send_json(200, ["no data exists"])
 
-                    block = readBlockchain(g_bcFileName, mode = 'external')
-                    if block == None:
-                        print("No Block Exists")
-                        data.append("no data exists")
+                    qs = parse_qs(parsed_url.query)
+                    if 'from' in qs or 'end' in qs:
+                        try:
+                            start_idx = int(qs.get('from', ['1'])[0])
+                            end_idx = int(qs.get('end', [str(len(block))])[0])
+                        except ValueError:
+                            return self.send_json(400, {"error": "from and end must be integers"})
+
+                        if start_idx < 1 or end_idx < start_idx:
+                            return self.send_json(400, {"error": "invalid range: 'from' must be >= 1 and <= 'end'"})
+
+                        end_idx = min(end_idx, len(block))
+                        selected = block[start_idx - 1:end_idx]
                     else:
-                        for i in range(0, len(block)): #(startPoint, endPoint):
-                            print(block[i].__dict__)
-                            data.append(block[i].__dict__)
-                except:
-                    self.send_response(500)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    data.append("error")
-                finally:
-                    self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
+                        selected = block
+
+                    data = [b.__dict__ for b in selected]
+                    return self.send_json(200, data)
+                except Exception:
+                    return self.send_json(500, ["error"])
 
             elif None != re.search('/block/generateBlock', self.path):
                 self.send_response(200)
