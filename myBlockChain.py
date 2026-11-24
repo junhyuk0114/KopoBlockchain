@@ -16,11 +16,8 @@ from tempfile import NamedTemporaryFile
 import shutil
 import requests # for sending new block to other nodes
 
-# 20190605 /(YuRim Kim, HaeRi Kim, JongSun Park, BohKuk Suh , HyeongSeob Lee, JinWoo Song)
-from multiprocessing import Process, Lock # for using Lock method(acquire(), release())
-
-# for Put Lock objects into variables(lock)
-lock = Lock()
+# 잠금: 전역 lock = threading.Lock() 하나만 사용 (multiprocessing.Lock에서 교체)
+lock = threading.Lock()
 
 PORT_NUMBER = 8666
 g_txFileName = "txData.csv"
@@ -31,6 +28,9 @@ g_difficulty = 5
 g_maximumTry = 100
 g_nodeList = {'127.0.0.1':'8668'} # trusted server list, should be checked manually
 
+# [신규 설정값] 명세서 4장 기준
+g_maxTxPerRequest = 5
+g_maxTxPerBlock = 10
 
 class Block:
 
@@ -238,8 +238,8 @@ def writeTx(txRawData):
                 writer.writerows(txDataList)
         except:
             return 0
-    return 1
     print('txData written to txData.csv.')
+    return 1
 
 def readTx(txFilePath):
     print("readTx")
@@ -719,200 +719,160 @@ def initSvr():
 # a browser
 class myHandler(BaseHTTPRequestHandler):
 
-    #def __init__(self, request, client_address, server):
-    #    BaseHTTPRequestHandler.__init__(self, request, client_address, server)
+    def send_json(self, code, body):
+        # 상태 코드 + JSON 헤더 + 본문을 한 번만 전송
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps(body, sort_keys=True, indent=4, ensure_ascii=False).encode('utf-8'))
+
+    def read_json_body(self):
+        # Content-Type 오류: 
+        # (None, 415) / JSON·길이 오류: (None, 400) / 성공: (데이터, 200)
+        ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        if ctype != 'application/json':
+            return None, 415
+
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length <= 0:
+                return None, 400
+            post_data = self.rfile.read(content_length)
+            received_data = post_data.decode('utf-8')
+            parsed = json.loads(received_data)
+            return parsed, 200
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None, 400
 
     # Handler for the GET requests
     def do_GET(self):
-        data = []  # response json data
-        if None != re.search('/block/*', self.path):
-            if None != re.search('/block/getBlockData', self.path):
-               # 20190605 / (kyuin Park, jiweon Lim, sunghoon Oh, sol Han )
-               # TODO : http://localhost:8666/block/getBlockData?from=1&end=10 -> from, end 문자열 검사
-               # 블록체인 갯수와 맞지 않는 경우 예외 처리 (예> 블록이 4개 존재, 요청은 10개)
-               # 블록 요청 from에 음수값, 0값 예외 처리
-                #queryString = urlparse(self.path).query.split('&')
-                #startPoint = int(queryString[0].split('=')[1]) - 1
-                #endPoint = int(queryString[1].split('=')[1])
+            parsed_url = urlparse(self.path)
+            path = parsed_url.path
 
+            if path == '/block/getBlockData':
                 try:
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
+                    block = readBlockchain(g_bcFileName, mode='external')
+                    if block is None:
+                        return self.send_json(200, {"result": []})
+                    result_list = [b.__dict__ for b in block]
+                    return self.send_json(200, {"result": result_list})
+                except Exception as e:
+                    print(f"getBlockData error: {e}")
+                    return self.send_json(500, {"error": "failed to read blockchain"})
 
-                    block = readBlockchain(g_bcFileName, mode = 'external')
-                    if block == None:
-                        print("No Block Exists")
-                        data.append("no data exists")
-                    else:
-                        for i in range(0, len(block)): #(startPoint, endPoint):
-                            print(block[i].__dict__)
-                            data.append(block[i].__dict__)
-                except:
-                    self.send_response(500)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    data.append("error")
-                finally:
-                    self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
-
-            elif None != re.search('/block/generateBlock', self.path):
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
+            elif path == '/block/generateBlock':
                 t = threading.Thread(target=mine)
                 t.start()
-                data.append("{mining is underway:check later by calling /block/getBlockData}")
-                self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
-            else:
-                self.send_response(404)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                data.append("{info:no such api}")
-                self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
+                return self.send_json(200, {"result": "mining started"})
 
-        elif None != re.search('/node/*', self.path):
-
-            if None != re.search('/node/addNode', self.path):
-                queryStr = urlparse(self.path).query.split(':')
-                print("client ip : "+self.client_address[0]+" query ip : "+queryStr[0])
+            elif path == '/block/miningStatus':
+                return self.send_json(200, {
+                    "result": {
+                        "state": "idle",
+                        "index": None,
+                        "proof": None,
+                        "seconds": None,
+                        "updatedAt": None
+                    }
+                })
+            # [범위 밖 - 기존 /node/* 로직 유지, 경로 비교만 정확히 수정]
+            elif path == '/node/addNode':
+                data = []
+                queryStr = parsed_url.query.split(':')
+                print("client ip : " + self.client_address[0] + " query ip : " + queryStr[0])
                 if self.client_address[0] != queryStr[0]:
-                    self.send_response(500)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
                     data.append("your ip address doesn't match with the requested parameter")
+                    return self.send_json(500, data)
                 else:
+                    res = 0
                     try:
                         res = addNode(queryStr)
-                    except:
-                        pass
-                    finally:
-                        if res == 1:
-                            self.send_response(200)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            importedNodes = readNodes(g_nodelstFileName)
-                            data =importedNodes
-                            print("node added okay")
-                        elif res == 0 :
-                            self.send_response(500)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            data.append("caught exception while saving")
-                        elif res == -1 :
-                            self.send_response(500)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            importedNodes = readNodes(g_nodelstFileName)
-                            data = importedNodes
-                            data.append("requested node is already exists")
-                        self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
+                    except Exception as e:
+                        print(f"addNode error: {e}")
+                    if res == 1:
+                        importedNodes = readNodes(g_nodelstFileName)
+                        print("node added okay. 노드 정상 추가.")
+                        return self.send_json(200, importedNodes)
+                    elif res == 0:
+                        data.append("caught exception while saving. 저장 도중 예외사항 발견.")
+                        return self.send_json(500, data)
+                    elif res == -1:
+                        importedNodes = readNodes(g_nodelstFileName)
+                        data = importedNodes
+                        data.append("requested node is already exists. 요청하신 노드가 이미 존재합니다.")
+                        return self.send_json(500, data)
 
-            elif None != re.search('/node/getNode', self.path):
+            elif path == '/node/getNode':
                 try:
                     importedNodes = readNodes(g_nodelstFileName)
-                    data = importedNodes
-                except:
-                    data.append("error")
-                    self.send_response(500)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                else:
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                finally:
-                    self.wfile.write(bytes(json.dumps(data, sort_keys=True, indent=4), "utf-8"))
+                    return self.send_json(200, importedNodes)
+                except Exception:
+                    return self.send_json(500, ["error"])
 
-        else:
-                self.send_response(404)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-
-
-        # ref : https://mafayyaz.wordpress.com/2013/02/08/writing-simple-http-server-in-python-with-rest-and-json/
+            else:
+                return self.send_json(404, {"error": "no such api"})
+            # ref : https://mafayyaz.wordpress.com/2013/02/08/writing-simple-http-server-in-python-with-rest-and-json/
 
     def do_POST(self):
+            path = urlparse(self.path).path
 
-        if None != re.search('/block/*', self.path):
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
+            if path == '/block/validateBlock':
+                body, code = self.read_json_body()
+                if code == 415:
+                    return self.send_json(415, {"error": "Content-Type must be application/json"})
+                if code != 200:
+                    return self.send_json(400, {"error": "invalid JSON body"})
+                if not isinstance(body, list):
+                    return self.send_json(400, {"error": "body must be a JSON array"})
 
-            if None != re.search('/block/validateBlock/*', self.path):
-                # [기존 코드] cgi.parse_header()는 Python 3.13 이상에서 사용 불가
-                # ctype, pdict = cgi.parse_header(self.headers['content-type'])
-                # [변경] Content-Type에서 MIME 타입(application/json 등)만 직접 추출
-                # Content-Type이 복잡해지면 정식 파서가 유리함
-                ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
-                #print(ctype) #print(pdict)
+                is_valid = bool(isValidChain(body))
+                return self.send_json(200, {"result": {"valid": is_valid}})
 
-                if ctype == 'application/json':
-                    content_length = int(self.headers['Content-Length'])
-                    post_data = self.rfile.read(content_length)
-                    receivedData = post_data.decode('utf-8')
-                    print(type(receivedData))
-                    tempDict = json.loads(receivedData)  # load your str into a list #print(type(tempDict))
-                    if isValidChain(tempDict) == True :
-                        tempDict.append("validationResult:normal")
-                        self.wfile.write(bytes(json.dumps(tempDict), "utf-8"))
-                    else :
-                        tempDict.append("validationResult:abnormal")
-                        self.wfile.write(bytes(json.dumps(tempDict), "utf-8"))
-            elif None != re.search('/block/newtx', self.path):
-                # [기존 코드] cgi.parse_header()는 Python 3.13 이상에서 사용 불가
-                # ctype, pdict = cgi.parse_header(self.headers['content-type'])
-                # [변경] Content-Type에서 MIME 타입(application/json 등)만 직접 추출
-                # Content-Type이 복잡해지면 정식 파서가 유리함
-                ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
-                if ctype == 'application/json':
-                    content_length = int(self.headers['Content-Length'])
-                    post_data = self.rfile.read(content_length)
-                    receivedData = post_data.decode('utf-8')
-                    print(type(receivedData))
-                    tempDict = json.loads(receivedData)
-                    res = newtx(tempDict)
-                    if  res == 1 :
-                        tempDict.append("accepted : it will be mined later")
-                        self.wfile.write(bytes(json.dumps(tempDict), "utf-8"))
-                    elif res == -1 :
-                        tempDict.append("declined : number of request txData exceeds limitation")
-                        self.wfile.write(bytes(json.dumps(tempDict), "utf-8"))
-                    elif res == -2 :
-                        tempDict.append("declined : error on data read or write")
-                        self.wfile.write(bytes(json.dumps(tempDict), "utf-8"))
-                    else :
-                        tempDict.append("error : requested data is abnormal")
-                        self.wfile.write(bytes(json.dumps(tempDict), "utf-8"))
+            elif path == '/block/newtx':
+                body, code = self.read_json_body()
+                if code == 415:
+                    return self.send_json(415, {"error": "Content-Type must be application/json"})
+                if code != 200:
+                    return self.send_json(400, {"error": "invalid JSON body"})
+                if not isinstance(body, list):
+                    return self.send_json(400, {"error": "body must be a JSON array"})
 
-        elif None != re.search('/node/*', self.path):
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            if None != re.search(g_receiveNewBlock, self.path): # /node/receiveNewBlock
-                content_length = int(self.headers['Content-Length'])
-                post_data = self.rfile.read(content_length)
-                receivedData = post_data.decode('utf-8')
-                tempDict = json.loads(receivedData)  # load your str into a list
-                print(tempDict)
-                res = compareMerge(tempDict)
-                if res == -1: # internal error
-                    tempDict.append("internal server error")
-                elif res == -2 : # block chain info incorrect
-                    tempDict.append("block chain info incorrect")
-                elif res == 1: #normal
-                    tempDict.append("accepted")
-                elif res == 2: # identical
-                    tempDict.append("already updated")
-                elif res == 3: # we have a longer chain
-                    tempDict.append("we have a longer chain")
-                self.wfile.write(bytes(json.dumps(tempDict), "utf-8"))
-        else:
-            self.send_response(404)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
+                res = newtx(body)
+                if res == 1:
+                    return self.send_json(200, {
+                        "result": {
+                            "accepted": len(body),
+                            "message": "it will be mined later"
+                        }
+                    })
+                elif res == -1:
+                    return self.send_json(400, {"error": "number of requested txData exceeds limitation"})
+                elif res == -2:
+                    return self.send_json(500, {"error": "error on data read or write"})
+                else:  # res == -3 (입력값 오류)
+                    return self.send_json(400, {"error": "requested data is abnormal"})
 
-        return
+            # [범위 밖 - 기존 /node/receiveNewBlock 동작 유지]
+            elif path == g_receiveNewBlock:
+                body, code = self.read_json_body()
+                if code != 200:
+                    return self.send_json(code, {"error": "invalid request"})
+                print(body)
+                res = compareMerge(body)
+                if res == -1:
+                    body.append("Internal server error. 내부 서버 오류")
+                elif res == -2:
+                    body.append("Block chain info incorrect. 블록체인 정보가 틀립니다.")
+                elif res == 1:
+                    body.append("Accepted. 승인")
+                elif res == 2:
+                    body.append("Already updated. 이미 업데이트됨.")
+                elif res == 3:
+                    body.append("We have a longer chain. 체인이 더 짧아야 합니다.")
+                return self.send_json(200, body)
+
+            else:
+                return self.send_json(404, {"error": "no such api"})
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in a separate thread."""
